@@ -27,4 +27,3 @@ vendor/MoneyPrinterTurbo/**/__pycache__/
 # old Fact-Shorts archive is huge (films) — keep local only
 _archive_factshorts/
 vendor/MoneyPrinterTurbo/
-/.github/
