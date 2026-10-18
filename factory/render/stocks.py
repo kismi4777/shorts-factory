@@ -52,11 +52,13 @@ def search_pixabay(term: str, *, per_page: int = 10) -> list[str]:
     key = _pixabay_key()
     if not key:
         return []
+    # Pixabay API: per_page must be 3..200
+    per_page = max(3, min(int(per_page), 200))
     params = {
         "key": key,
         "q": term,
         "per_page": per_page,
-        "video_type": "film",
+        "video_type": "all",
         "safesearch": "true",
     }
     with httpx.Client(timeout=40.0) as client:
@@ -64,22 +66,29 @@ def search_pixabay(term: str, *, per_page: int = 10) -> list[str]:
         r.raise_for_status()
         data = r.json()
     urls: list[str] = []
+    # never grab "large" first — often 4K and hangs on slow links
+    size_rank = {"medium": 0, "small": 1, "tiny": 2, "large": 9}
     for hit in data.get("hits") or []:
         videos = hit.get("videos") or {}
-        # prefer medium, then large, then small; pick portrait if available
         candidates = []
-        for size_name in ("medium", "large", "small", "tiny"):
-            info = videos.get(size_name) or {}
+        for size_name, info in videos.items():
+            info = info or {}
             url = (info.get("url") or "").strip()
             if not url:
                 continue
             w = int(info.get("width") or 0)
             h = int(info.get("height") or 0)
+            # skip empty / huge 4K packs
+            if int(info.get("size") or 0) > 40_000_000:
+                continue
+            if max(w, h) > 1920 and size_name == "large":
+                continue
             portrait = 0 if h >= w else 1
-            candidates.append((portrait, -h, url))
+            rank = size_rank.get(size_name, 5)
+            candidates.append((rank, portrait, -min(h, 1080), url))
         candidates.sort()
         if candidates:
-            urls.append(candidates[0][2])
+            urls.append(candidates[0][3])
     return urls
 
 
@@ -117,13 +126,36 @@ def search_pexels(term: str, *, per_page: int = 8) -> list[str]:
 
 
 def download_file(url: str, dest: Path) -> Path:
+    """Download via curl (more reliable than httpx for Pixabay CDN)."""
+    import subprocess
+
     dest.parent.mkdir(parents=True, exist_ok=True)
-    with httpx.Client(timeout=120.0, follow_redirects=True) as client:
-        with client.stream("GET", url) as r:
-            r.raise_for_status()
-            with open(dest, "wb") as f:
-                for chunk in r.iter_bytes():
-                    f.write(chunk)
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    tmp.unlink(missing_ok=True)
+    cmd = [
+        "curl.exe", "-L", "--fail", "--retry", "2",
+        "--connect-timeout", "15", "--max-time", "45",
+        "-o", str(tmp), url,
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0 or not tmp.is_file() or tmp.stat().st_size < 10_000:
+        tmp.unlink(missing_ok=True)
+        # fallback httpx
+        timeout = httpx.Timeout(connect=15.0, read=45.0, write=45.0, pool=15.0)
+        with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+            with client.stream("GET", url) as r:
+                r.raise_for_status()
+                written = 0
+                with open(tmp, "wb") as f:
+                    for chunk in r.iter_bytes(chunk_size=256 * 1024):
+                        f.write(chunk)
+                        written += len(chunk)
+                        if written > 45_000_000:
+                            break
+        if not tmp.is_file() or tmp.stat().st_size < 10_000:
+            tmp.unlink(missing_ok=True)
+            raise RuntimeError(f"download failed: {url[:80]}")
+    tmp.replace(dest)
     return dest
 
 
@@ -160,10 +192,11 @@ def fetch_clips(
     for term in terms:
         if len(paths) >= count:
             break
-        _ingest(search_pixabay(term), "pixabay")
+        # only first 3 urls per term — don't stall on a bad CDN link
+        _ingest(search_pixabay(term)[:3], "pixabay")
         if len(paths) >= count:
             break
-        _ingest(search_pexels(term), "pexels")
+        _ingest(search_pexels(term)[:3], "pexels")
 
     return paths
 
