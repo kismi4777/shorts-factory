@@ -1,0 +1,30 @@
+# secrets / local
+.env
+.env.*
+!.env.example
+spec_secrets.json
+*.session
+_tg_auth_state.json
+
+# editor
+.cursor/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# factory outputs (keep jobs JSON)
+output/
+factory/**/work/
+
+# MPT runtime
+vendor/MoneyPrinterTurbo/config.toml
+vendor/MoneyPrinterTurbo/storage/
+vendor/MoneyPrinterTurbo/**/__pycache__/
+
+# old Fact-Shorts archive is huge (films) — keep local only
+_archive_factshorts/
+vendor/MoneyPrinterTurbo/
+/.github/

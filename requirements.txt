@@ -1,0 +1,4 @@
+# Shorts Factory — lean render path (FFmpeg + Edge-TTS)
+# MoneyPrinterTurbo lives in vendor/ for reference / optional full pipeline.
+httpx>=0.27
+edge-tts>=6.1
