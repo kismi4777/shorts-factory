@@ -27,3 +27,7 @@ vendor/MoneyPrinterTurbo/**/__pycache__/
 # old Fact-Shorts archive is huge (films) — keep local only
 _archive_factshorts/
 vendor/MoneyPrinterTurbo/
+
+# gameplay beds (~1GB+) — local only; reddit renders on this PC
+assets/backgrounds/gameplay_*.mp4
+assets/backgrounds/_yt_raw*

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import random
+
 from factory.job_schema import ROOT, ShortJob, new_job_id, save_job
 from factory.ollama_script import generate_reddit_script
 
@@ -13,13 +15,15 @@ def make_reddit_job(
     voice: str = "ru-RU-DmitryNeural",
     background: str = "",
 ) -> ShortJob:
-    print(f"🧠 Ollama reddit/gameplay script: {topic!r}")
+    print(f"[reddit] Ollama script: {topic!r}")
     data = generate_reddit_script(topic, language=language)
     bg = background
     if not bg:
-        defaults = sorted((ROOT / "assets" / "backgrounds").glob("*.mp4"))
+        defaults = list((ROOT / "assets" / "backgrounds").glob("*.mp4"))
         if defaults:
-            bg = str(defaults[0].relative_to(ROOT)).replace("\\", "/")
+            pick = random.choice(defaults)
+            bg = str(pick.relative_to(ROOT)).replace("\\", "/")
+            print(f"[reddit] background -> {bg}")
     job = ShortJob(
         id=new_job_id(topic),
         mode="reddit_gameplay",
@@ -36,5 +40,5 @@ def make_reddit_job(
         },
     )
     path = save_job(job)
-    print(f"💾 job → {path}")
+    print(f"[reddit] job -> {path}")
     return job

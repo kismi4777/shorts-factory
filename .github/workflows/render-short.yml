@@ -54,6 +54,23 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # Large gameplay beds live in a Release (not in git). Needed for reddit_gameplay.
+      - name: Fetch gameplay backgrounds
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p assets/backgrounds
+          if ls assets/backgrounds/gameplay_*.mp4 >/dev/null 2>&1; then
+            echo "backgrounds already present"
+            exit 0
+          fi
+          TAG="backgrounds-v1"
+          echo "Downloading release $TAG …"
+          gh release download "$TAG" -R "${{ github.repository }}" -p "gameplay_beds.zip" -O /tmp/gameplay_beds.zip
+          unzip -o /tmp/gameplay_beds.zip -d assets/backgrounds
+          ls assets/backgrounds/gameplay_*.mp4 | wc -l
+
       - name: Render
         env:
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
