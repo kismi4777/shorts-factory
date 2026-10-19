@@ -19,7 +19,11 @@ def render_job(job: ShortJob, *, work_root: Path | None = None) -> Path:
     final_dir.mkdir(parents=True, exist_ok=True)
     out_mp4 = final_dir / "output.mp4"
 
+    from factory.script_prep import extract_spoken_script, looks_like_ready_script
+
     script = (job.script or "").strip()
+    if looks_like_ready_script(script):
+        script = extract_spoken_script(script) or script
     if not script:
         raise RuntimeError("job.script is empty — generate with Ollama first")
 
@@ -88,24 +92,31 @@ def render_job(job: ShortJob, *, work_root: Path | None = None) -> Path:
 
 
 def _resolve_background(rel: str) -> Path:
+    default_dir = ROOT / "assets" / "backgrounds"
+
+    def _any_bed() -> Path | None:
+        beds = sorted(default_dir.glob("gameplay_*.mp4")) or sorted(default_dir.glob("*.mp4"))
+        return beds[0] if beds else None
+
     if not rel:
-        default_dir = ROOT / "assets" / "backgrounds"
-        defaults = sorted(default_dir.glob("*.mp4"))
-        if not defaults:
+        hit = _any_bed()
+        if not hit:
             raise RuntimeError(
                 "no background video — put an mp4 in assets/backgrounds/ "
-                "or set job.background"
+                "or set job.background (Actions: backgrounds Release)"
             )
-        return defaults[0]
+        return hit
     p = Path(rel)
     if p.is_file():
         return p
-    cand = ROOT / rel
-    if cand.is_file():
-        return cand
-    cand2 = ROOT / "assets" / "backgrounds" / rel
-    if cand2.is_file():
-        return cand2
+    for cand in (ROOT / rel, default_dir / Path(rel).name, default_dir / rel):
+        if cand.is_file():
+            return cand
+    # local job may point at gameplay_38 while GHA only has 01–10
+    hit = _any_bed()
+    if hit:
+        print(f"  [warn] background missing {rel!r} -> fallback {hit.name}")
+        return hit
     raise RuntimeError(f"background not found: {rel}")
 
 

@@ -1,21 +1,20 @@
 """
 Telegram bot for Shorts Factory.
 
-Flow: topic → Ollama (local script) → jobs/*.json → git push → GitHub Actions render
-      → download artifact → send mp4 to chat.
-
-Requires: TELEGRAM_BOT_TOKEN, Ollama running, gh auth, PIXABAY in GH secrets.
-Gameplay beds are fetched in Actions from the backgrounds Release.
+Flow: topic/script → (Ollama only if short topic) → jobs/*.json
+      → git push → GitHub Actions → download mp4 → send to chat.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
-import re
+import shutil
 import subprocess
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -67,7 +66,12 @@ def _gh() -> str:
     return "gh"
 
 
-def _run(cmd: list[str], *, cwd: Path | None = None, timeout: float = 120) -> subprocess.CompletedProcess[str]:
+def _run(
+    cmd: list[str],
+    *,
+    cwd: Path | None = None,
+    timeout: float = 120,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         cmd,
         cwd=str(cwd or ROOT),
@@ -93,11 +97,11 @@ def _mode_keyboard() -> InlineKeyboardMarkup:
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data["mode"] = "stock"
     await update.effective_message.reply_text(
-        "Shorts Factory бот.\n\n"
-        "1) Выбери режим\n"
-        "2) Пришли тему одним сообщением\n\n"
-        "Я: Ollama (сценарий) → job → GitHub Actions → mp4.\n"
-        "Нужны: включённый ПК, Ollama, сеть.",
+        "Shorts Factory.\n\n"
+        "1) Режим\n"
+        "2) Короткая тема ИЛИ готовый сценарий (Голос:/таймкоды)\n\n"
+        "Готовый сценарий → без Ollama.\n"
+        "Короткая тема → Ollama → Actions → mp4.",
         reply_markup=_mode_keyboard(),
     )
 
@@ -115,7 +119,10 @@ async def on_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         mode = "stock"
     context.user_data["mode"] = mode
     label = "Stock" if mode == "stock" else "Reddit/геймплей"
-    await q.edit_message_text(f"Режим: <b>{label}</b>\nПришли тему.", parse_mode=ParseMode.HTML)
+    await q.edit_message_text(
+        f"Режим: <b>{label}</b>\nПришли тему или готовый сценарий.",
+        parse_mode=ParseMode.HTML,
+    )
 
 
 async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -125,14 +132,16 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if len(text) < 3:
         await update.effective_message.reply_text("Тема слишком короткая.")
         return
-    if len(text) > 3500:
-        await update.effective_message.reply_text("Текст слишком длинный (макс ~3500 символов).")
+    if len(text) > 8000:
+        await update.effective_message.reply_text("Текст слишком длинный (макс ~8000).")
         return
 
     mode = context.user_data.get("mode") or "stock"
-    kind = "готовый текст" if len(text) >= 280 else "тема"
+    from factory.script_prep import looks_like_ready_script
+
+    ready = looks_like_ready_script(text)
     status = await update.effective_message.reply_text(
-        f"Пишу сценарий ({kind}, {mode})…"
+        "Беру готовый сценарий…" if ready else f"Пишу сценарий ({mode})…"
     )
     await update.effective_chat.send_action(ChatAction.TYPING)
 
@@ -144,9 +153,10 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     await status.edit_text(
-        f"Job готов: <code>{job_path.name}</code>\nПушу в GitHub…",
+        f"Job: <code>{job_path.name}</code>\nПушу в GitHub…",
         parse_mode=ParseMode.HTML,
     )
+    pushed_at = datetime.now(timezone.utc)
     try:
         await asyncio.to_thread(_git_push_job, job_path)
     except Exception as e:
@@ -154,14 +164,15 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await status.edit_text(f"Не смог запушить job: {e}")
         return
 
-    await status.edit_text("GitHub Actions собирает ролик (обычно 1–3 мин)…")
+    await status.edit_text("GitHub Actions собирает ролик…")
     try:
-        mp4 = await asyncio.to_thread(_wait_and_download, job_path, timeout_sec=600)
+        mp4 = await asyncio.to_thread(
+            _wait_and_download, job_path, pushed_at=pushed_at, timeout_sec=720
+        )
     except Exception as e:
         log.exception("gha failed")
-        run_url = os.environ.get("LAST_GHA_URL", "")
-        tip = f"\n{run_url}" if run_url else ""
-        await status.edit_text(f"Сборка не вышла: {e}{tip}")
+        tip = os.environ.get("LAST_GHA_URL", "")
+        await status.edit_text(f"Сборка не вышла: {e}" + (f"\n{tip}" if tip else ""))
         return
 
     await status.edit_text("Готово, отправляю…")
@@ -184,6 +195,13 @@ async def on_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 def _make_job(mode: str, topic: str) -> Path:
     from factory.modes.reddit_gameplay import make_reddit_job
     from factory.modes.stock import make_stock_job
+    from factory.script_prep import looks_like_ready_script
+
+    # Ollama only needed for short topics
+    if not looks_like_ready_script(topic):
+        from factory.ollama_script import ensure_ollama
+
+        ensure_ollama()
 
     if mode == "reddit_gameplay":
         job = make_reddit_job(topic)
@@ -200,24 +218,28 @@ def _git_push_job(job_path: Path) -> None:
     r1 = _run(["git", "add", "--", rel])
     if r1.returncode != 0:
         raise RuntimeError(r1.stderr or r1.stdout or "git add failed")
-    # commit only if something staged
     st = _run(["git", "status", "--porcelain", "--", rel])
     if not (st.stdout or "").strip():
-        # already committed? still try dispatch
         _dispatch_workflow(rel)
         return
     msg = f"job: {job_path.stem}"
     r2 = _run(
-        ["git", "-c", "user.email=shorts-factory-bot@local", "-c", "user.name=Shorts Factory Bot",
-         "commit", "-m", msg]
+        [
+            "git",
+            "-c",
+            "user.email=shorts-factory-bot@local",
+            "-c",
+            "user.name=Shorts Factory Bot",
+            "commit",
+            "-m",
+            msg,
+        ]
     )
     if r2.returncode != 0:
         raise RuntimeError(r2.stderr or r2.stdout or "git commit failed")
     r3 = _run(["git", "push", "origin", "HEAD"], timeout=180)
     if r3.returncode != 0:
         raise RuntimeError(r3.stderr or r3.stdout or "git push failed")
-    # push already triggers workflow; also explicit dispatch as backup
-    _dispatch_workflow(rel)
 
 
 def _dispatch_workflow(job_rel: str) -> None:
@@ -228,56 +250,97 @@ def _dispatch_workflow(job_rel: str) -> None:
         timeout=60,
     )
     if r.returncode != 0:
-        # push-trigger may be enough
         log.warning("workflow dispatch: %s", r.stderr or r.stdout)
 
 
-def _wait_and_download(job_path: Path, *, timeout_sec: int = 600) -> Path:
+def _parse_gh_time(s: str) -> datetime | None:
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _wait_and_download(
+    job_path: Path,
+    *,
+    pushed_at: datetime | None = None,
+    timeout_sec: int = 720,
+) -> Path:
     gh = _gh()
     repo = os.environ.get("GITHUB_REPO", "kismi4777/shorts-factory")
+    stem = job_path.stem
     deadline = time.time() + timeout_sec
     run_id: str | None = None
+    floor = (pushed_at or datetime.now(timezone.utc)).timestamp() - 90
 
-    # find newest run
     while time.time() < deadline:
         r = _run(
-            [gh, "run", "list", "-R", repo, "--workflow", "render-short.yml", "--limit", "5",
-             "--json", "databaseId,status,conclusion,url,displayTitle,createdAt"],
+            [
+                gh,
+                "run",
+                "list",
+                "-R",
+                repo,
+                "--workflow",
+                "render-short.yml",
+                "--limit",
+                "20",
+                "--json",
+                "databaseId,status,conclusion,url,displayTitle,createdAt",
+            ],
             timeout=60,
         )
         if r.returncode == 0 and r.stdout.strip():
-            import json
-
             runs = json.loads(r.stdout)
-            if runs:
-                run_id = str(runs[0]["databaseId"])
-                os.environ["LAST_GHA_URL"] = runs[0].get("url") or ""
-                status = runs[0].get("status")
-                conclusion = runs[0].get("conclusion")
-                if status == "completed":
-                    if conclusion != "success":
-                        raise RuntimeError(f"Actions {conclusion}: {os.environ.get('LAST_GHA_URL')}")
+            matched = [x for x in runs if stem in (x.get("displayTitle") or "")]
+            recent = []
+            for x in matched or runs:
+                ct = _parse_gh_time(x.get("createdAt") or "")
+                if ct and ct.timestamp() < floor:
+                    continue
+                recent.append(x)
+            cand = (matched or recent or runs)[0] if (matched or recent or runs) else None
+            if matched:
+                cand = matched[0]
+            elif recent:
+                cand = recent[0]
+            if cand:
+                run_id = str(cand["databaseId"])
+                os.environ["LAST_GHA_URL"] = cand.get("url") or ""
+                if cand.get("status") == "completed":
+                    if cand.get("conclusion") != "success":
+                        raise RuntimeError(
+                            f"Actions {cand.get('conclusion')}: {os.environ.get('LAST_GHA_URL')}"
+                        )
                     break
         time.sleep(8)
     else:
         raise RuntimeError("timeout waiting for GitHub Actions")
 
     assert run_id
-    OUT_GHA.mkdir(parents=True, exist_ok=True)
-    # clear old for this job id
-    for old in OUT_GHA.glob(f"**/{job_path.stem}/**"):
-        pass
+    dest = OUT_GHA / stem
+    if dest.exists():
+        shutil.rmtree(dest, ignore_errors=True)
+    dest.mkdir(parents=True, exist_ok=True)
+
     dl = _run(
-        [gh, "run", "download", run_id, "-R", repo, "-n", "short-output", "-D", str(OUT_GHA)],
-        timeout=180,
+        [gh, "run", "download", run_id, "-R", repo, "-n", "short-output", "-D", str(dest)],
+        timeout=360,
     )
     if dl.returncode != 0:
-        raise RuntimeError(dl.stderr or dl.stdout or "artifact download failed")
+        # file-exists race — try once more on clean dir
+        shutil.rmtree(dest, ignore_errors=True)
+        dest.mkdir(parents=True, exist_ok=True)
+        dl = _run(
+            [gh, "run", "download", run_id, "-R", repo, "-n", "short-output", "-D", str(dest)],
+            timeout=360,
+        )
+        if dl.returncode != 0:
+            raise RuntimeError(dl.stderr or dl.stdout or "artifact download failed")
 
-    # find mp4 matching job id or newest
-    matches = list(OUT_GHA.rglob(f"*{job_path.stem}*/output.mp4"))
-    if not matches:
-        matches = sorted(OUT_GHA.rglob("output.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)
+    matches = sorted(dest.rglob("output.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)
     if not matches:
         raise RuntimeError("mp4 not found in artifact")
     return matches[0]
@@ -285,7 +348,6 @@ def _wait_and_download(job_path: Path, *, timeout_sec: int = 600) -> Path:
 
 def main() -> None:
     _load_dotenv()
-    # Windows consoles often use cp1251 — force UTF-8 for prints
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
     try:
         import sys
@@ -301,7 +363,6 @@ def main() -> None:
             "Нет TELEGRAM_BOT_TOKEN. Добавь в .env:\n"
             "TELEGRAM_BOT_TOKEN=123:ABC…  (от @BotFather)"
         )
-    # ensure factory imports
     os.environ.setdefault("PYTHONPATH", str(ROOT))
     if str(ROOT) not in os.sys.path:
         os.sys.path.insert(0, str(ROOT))

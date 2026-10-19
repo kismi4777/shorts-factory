@@ -6,6 +6,7 @@ import re
 
 from factory.job_schema import ShortJob, new_job_id, save_job
 from factory.ollama_script import generate_stock_script
+from factory.script_prep import extract_spoken_script, looks_like_ready_script, topic_slug
 
 
 def make_stock_job(
@@ -16,17 +17,17 @@ def make_stock_job(
     ready_script: str = "",
 ) -> ShortJob:
     ready = (ready_script or "").strip()
-    # длинный текст пользователя = готовый сценарий/факт
-    if not ready and len(topic.strip()) >= 280:
-        ready = topic.strip()
-        topic = _topic_from_long(ready)
+    # длинный / размеченный текст = готовый сценарий
+    if not ready and looks_like_ready_script(topic):
+        ready = extract_spoken_script(topic) or topic.strip()
+        topic = topic_slug(ready)
 
     if ready:
         print(f"[stock] ready text, topic={topic!r}, chars={len(ready)}")
         try:
-            # длинный факт → короткий spoken script + EN terms
+            # короткий промпт — иначе Ollama 500
             data = generate_stock_script(
-                f"{topic}\n\nФакт для озвучки (сожми в короткий spoken script):\n{ready[:1800]}",
+                f"Тема: {topic}\nСожми в spoken script <90 слов + EN search_terms:\n{ready[:500]}",
                 language=language,
             )
             terms = list(data.get("search_terms") or [])
@@ -59,12 +60,6 @@ def make_stock_job(
     path = save_job(job)
     print(f"[stock] job -> {path}")
     return job
-
-
-def _topic_from_long(text: str) -> str:
-    first = re.split(r"[.!?\n]", text, maxsplit=1)[0].strip()
-    words = re.findall(r"[A-Za-zА-Яа-яЁё0-9\-]+", first)
-    return " ".join(words[:8]) or text[:60]
 
 
 def _fallback_terms(topic: str, script: str) -> list[str]:

@@ -5,12 +5,25 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from typing import Any
 
 import httpx
 
 DEFAULT_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:1.5b")
 DEFAULT_BASE = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+# tiny model — keep prompts short or it 500s
+_MAX_USER_CHARS = 700
+
+
+def ensure_ollama(*, timeout: float = 5.0) -> None:
+    try:
+        r = httpx.get(f"{DEFAULT_BASE}/api/tags", timeout=timeout)
+        r.raise_for_status()
+    except Exception as e:
+        raise RuntimeError(
+            f"Ollama не отвечает на {DEFAULT_BASE} — запусти приложение Ollama. ({e})"
+        ) from e
 
 
 def _extract_json(text: str) -> dict[str, Any]:
@@ -27,8 +40,34 @@ def _extract_json(text: str) -> dict[str, Any]:
     return json.loads(m.group(0))
 
 
-def chat_json(system: str, user: str, *, model: str = DEFAULT_MODEL, timeout: float = 90.0) -> dict[str, Any]:
+def _warmup(client: httpx.Client, model: str) -> None:
+    try:
+        client.post(
+            f"{DEFAULT_BASE}/api/chat",
+            json={
+                "model": model,
+                "stream": False,
+                "messages": [{"role": "user", "content": "ok"}],
+                "options": {"num_predict": 4, "num_ctx": 512},
+            },
+            timeout=90.0,
+        )
+    except Exception:
+        pass
+
+
+def chat_json(
+    system: str,
+    user: str,
+    *,
+    model: str = DEFAULT_MODEL,
+    timeout: float = 120.0,
+) -> dict[str, Any]:
+    ensure_ollama()
     url = f"{DEFAULT_BASE}/api/chat"
+    user = (user or "").strip()
+    if len(user) > _MAX_USER_CHARS:
+        user = user[:_MAX_USER_CHARS].rsplit(" ", 1)[0] + "…"
     payload = {
         "model": model,
         "stream": False,
@@ -37,14 +76,31 @@ def chat_json(system: str, user: str, *, model: str = DEFAULT_MODEL, timeout: fl
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        "options": {"temperature": 0.7},
+        # keep ctx small — 1.5b + 4096 often 500s on Windows
+        "options": {"temperature": 0.7, "num_ctx": 2048, "num_predict": 400},
     }
+    last_err: Exception | None = None
     with httpx.Client(timeout=timeout) as client:
-        r = client.post(url, json=payload)
-        r.raise_for_status()
-        data = r.json()
-    content = (data.get("message") or {}).get("content") or ""
-    return _extract_json(content)
+        _warmup(client, model)
+        for attempt in range(3):
+            try:
+                r = client.post(url, json=payload)
+                r.raise_for_status()
+                data = r.json()
+                content = (data.get("message") or {}).get("content") or ""
+                return _extract_json(content)
+            except (httpx.HTTPStatusError, httpx.TransportError, json.JSONDecodeError, RuntimeError) as e:
+                last_err = e
+                status = getattr(getattr(e, "response", None), "status_code", 0) or 0
+                # retry 5xx / transport / bad json
+                retryable = isinstance(e, httpx.TransportError) or status >= 500 or isinstance(
+                    e, (json.JSONDecodeError, RuntimeError)
+                )
+                if not retryable or attempt >= 2:
+                    break
+                time.sleep(1.5 * (attempt + 1))
+                _warmup(client, model)
+    raise RuntimeError(f"Ollama failed after retries: {last_err}") from last_err
 
 
 def generate_stock_script(topic: str, *, language: str = "ru") -> dict[str, Any]:
