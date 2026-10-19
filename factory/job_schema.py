@@ -31,7 +31,7 @@ class ShortJob:
     height: int = 1920
     background: str = ""  # relative path under assets/backgrounds for reddit
     bgm: str = ""
-    subtitle_style: str = "popup"
+    subtitle_style: str = "capcut"  # word-synced CapCut-style ASS from Edge-TTS timings
     created_at: str = ""
     meta: dict[str, Any] = field(default_factory=dict)
 
