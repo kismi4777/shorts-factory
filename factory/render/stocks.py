@@ -125,23 +125,40 @@ def search_pexels(term: str, *, per_page: int = 8) -> list[str]:
     return urls
 
 
+def _curl_bin() -> str:
+    import shutil
+
+    # Windows often has curl.exe; Linux/macOS: curl
+    for name in ("curl", "curl.exe"):
+        path = shutil.which(name)
+        if path:
+            return path
+    return ""
+
+
 def download_file(url: str, dest: Path) -> Path:
-    """Download via curl (more reliable than httpx for Pixabay CDN)."""
+    """Download via curl (cross-platform), fallback httpx."""
     import subprocess
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".part")
     tmp.unlink(missing_ok=True)
-    cmd = [
-        "curl.exe", "-L", "--fail", "--retry", "2",
-        "--connect-timeout", "15", "--max-time", "45",
-        "-o", str(tmp), url,
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0 or not tmp.is_file() or tmp.stat().st_size < 10_000:
-        tmp.unlink(missing_ok=True)
-        # fallback httpx
-        timeout = httpx.Timeout(connect=15.0, read=45.0, write=45.0, pool=15.0)
+
+    curl = _curl_bin()
+    ok = False
+    if curl:
+        cmd = [
+            curl, "-L", "--fail", "--retry", "2",
+            "--connect-timeout", "20", "--max-time", "90",
+            "-o", str(tmp), url,
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        ok = proc.returncode == 0 and tmp.is_file() and tmp.stat().st_size >= 10_000
+        if not ok:
+            tmp.unlink(missing_ok=True)
+
+    if not ok:
+        timeout = httpx.Timeout(connect=20.0, read=90.0, write=60.0, pool=20.0)
         with httpx.Client(timeout=timeout, follow_redirects=True) as client:
             with client.stream("GET", url) as r:
                 r.raise_for_status()
@@ -183,20 +200,32 @@ def fetch_clips(
             try:
                 download_file(url, dest)
                 paths.append(dest)
-                print(f"  ↓ {label}: {name}")
+                print(f"  ok {label}: {name}")
             except Exception as e:
                 print(f"  warn {label} download: {e}")
             if len(paths) >= count:
                 return
 
-    for term in terms:
+    # always pad with generic B-roll queries — brand names like "Lumon" often return 0
+    padded = list(terms or [])
+    for extra in ("office corridor", "winter city empty", "underground bunker", "data center"):
+        if extra not in padded:
+            padded.append(extra)
+
+    for term in padded:
         if len(paths) >= count:
             break
         # only first 3 urls per term — don't stall on a bad CDN link
-        _ingest(search_pixabay(term)[:3], "pixabay")
+        try:
+            _ingest(search_pixabay(term)[:3], "pixabay")
+        except Exception as e:
+            print(f"  warn pixabay search {term!r}: {e}")
         if len(paths) >= count:
             break
-        _ingest(search_pexels(term)[:3], "pexels")
+        try:
+            _ingest(search_pexels(term)[:3], "pexels")
+        except Exception as e:
+            print(f"  warn pexels search {term!r}: {e}")
 
     return paths
 

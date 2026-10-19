@@ -8,10 +8,18 @@ from pathlib import Path
 from typing import Any
 
 
-async def _synth(text: str, voice: str, mp3_path: Path) -> list[dict[str, Any]]:
+async def _synth(
+    text: str,
+    voice: str,
+    mp3_path: Path,
+    *,
+    rate: str = "-8%",
+    pitch: str = "+0Hz",
+) -> list[dict[str, Any]]:
     import edge_tts
 
-    communicate = edge_tts.Communicate(text, voice)
+    # slower rate = clearer RU narration (Edge free voices still robotic)
+    communicate = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
     words: list[dict[str, Any]] = []
     mp3_path.parent.mkdir(parents=True, exist_ok=True)
     with open(mp3_path, "wb") as f:
@@ -33,6 +41,8 @@ async def _synth(text: str, voice: str, mp3_path: Path) -> list[dict[str, Any]]:
 
 def synthesize(text: str, voice: str, mp3_path: Path) -> list[dict[str, Any]]:
     clean = re.sub(r"\s+", " ", (text or "").strip())
+    # strip leftover quote titles that confuse TTS
+    clean = re.sub(r"^[«\"].*?[»\"]\s*", "", clean).strip() or clean
     if not clean:
         raise RuntimeError("empty TTS text")
     return asyncio.run(_synth(clean, voice, mp3_path))

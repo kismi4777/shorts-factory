@@ -23,7 +23,7 @@ def render_job(job: ShortJob, *, work_root: Path | None = None) -> Path:
     if not script:
         raise RuntimeError("job.script is empty — generate with Ollama first")
 
-    print(f"🔊 TTS ({job.voice})…")
+    print(f"[render] TTS ({job.voice})")
     mp3 = work / "voice.mp3"
     words = tts.synthesize(script, job.voice, mp3)
     audio_dur = ff.probe_duration(mp3)
@@ -42,7 +42,7 @@ def render_job(job: ShortJob, *, work_root: Path | None = None) -> Path:
             encoding="utf-8",
         )
 
-    print(f"🎬 Video bed ({job.mode})…")
+    print(f"[render] video bed ({job.mode})")
     if job.mode == "reddit_gameplay":
         bg = _resolve_background(job.background)
         video_silent = ff.loop_background(bg, work / "bed.mp4", job.width, job.height, audio_dur + 0.3)
@@ -50,7 +50,12 @@ def render_job(job: ShortJob, *, work_root: Path | None = None) -> Path:
         clips_dir = work / "clips"
         clips = stocks.fetch_clips(job.search_terms or [job.topic], clips_dir, count=4)
         if not clips:
-            print("  ⚠️ no stock clips (set PIXABAY_API_KEY) → placeholders")
+            key_on = bool(stocks._pixabay_key() or stocks._pexels_key())
+            if key_on:
+                raise RuntimeError(
+                    "Pixabay key is set but no clips downloaded — check search terms / CDN"
+                )
+            print("  [warn] no stock API key -> placeholders")
             clips = stocks.ensure_placeholder_clips(clips_dir, count=3, seconds=4.0)
         video_silent = ff.concat_clips(clips, work / "bed.mp4", job.width, job.height, audio_dur + 0.3)
 
@@ -59,7 +64,7 @@ def render_job(job: ShortJob, *, work_root: Path | None = None) -> Path:
         cand = ROOT / job.bgm
         bgm = cand if cand.is_file() else None
 
-    print("🧩 Mux + burn subs…")
+    print("[render] mux + burn subs")
     # run mux from work dir so ass path is simple
     cwd = Path.cwd()
     try:
@@ -78,7 +83,7 @@ def render_job(job: ShortJob, *, work_root: Path | None = None) -> Path:
     finally:
         os.chdir(cwd)
 
-    print(f"✅ {out_mp4}")
+    print(f"[render] done {out_mp4}")
     return out_mp4
 
 
@@ -149,7 +154,7 @@ def _mux_relative(
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         # fallback: no burn-in, just mux
-        print("  ⚠️ ass burn failed, mux without subs")
+        print("  [warn] ass burn failed, mux without subs")
         print((proc.stderr or "")[-800:])
         cmd2 = [
             "ffmpeg", "-y",
